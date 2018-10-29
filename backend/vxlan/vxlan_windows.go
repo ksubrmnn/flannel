@@ -36,6 +36,8 @@ import (
 	"github.com/coreos/flannel/backend"
 	"github.com/coreos/flannel/pkg/ip"
 	"github.com/coreos/flannel/subnet"
+	"github.com/Microsoft/hcsshim"
+	"github.com/Microsoft/hcsshim/hcn"
 	"net"
 )
 
@@ -62,10 +64,21 @@ func New(sm subnet.Manager, extIface *backend.ExternalInterface) (backend.Backen
 	return backend, nil
 }
 
-func newSubnetAttrs(publicIP net.IP) (*subnet.LeaseAttrs, error) {
+func newSubnetAttrs(publicIP net.IP, vsid uint16, mac net.HardwareAddr) (*subnet.LeaseAttrs, error) {
+	leaseAttrs := &vxlanLeaseAttrs{ 
+		VNI : vsid,
+		VtepMAC: hardwareAddr(mac),
+
+		}
+	data, err := json.Marshal(&leaseAttrs)
+	if err != nil {
+		return nil, err
+	}
+
 	return &subnet.LeaseAttrs{
 		PublicIP:    ip.FromIP(publicIP),
 		BackendType: "vxlan",
+		BackendData: json.RawMessage(data),
 	}, nil
 }
 
@@ -111,20 +124,45 @@ func (be *VXLANBackend) RegisterNetwork(ctx context.Context, wg sync.WaitGroup, 
 	}
 	log.Infof("VXLAN config: Name=%s MacPrefix=%s VNI=%d Port=%d GBP=%v DirectRouting=%v", cfg.Name, cfg.MacPrefix, cfg.VNI, cfg.Port, cfg.GBP, cfg.DirectRouting)
 
-	devAttrs := vxlanDeviceAttrs{
-		vni:           uint32(cfg.VNI),
-		name:          cfg.Name,
-		addressPrefix: config.Network,
+	
+
+	
+
+	hnsNetworks, err := hcsshim.HNSListNetworkRequest("GET", "", "")
+	if err != nil {
+		log.Infof("Cannot get HNS networks [%+v]", err)
 	}
 
-	dev, err := newVXLANDevice(&devAttrs)
+	var remoteDrMac string
+	for _, hnsnetwork:= range hnsNetworks {
+		log.Infof("Exists vs target: %+v vs %v", hnsnetwork.ManagementIP, be.extIface.ExtAddr.String())
+		
+		if hnsnetwork.ManagementIP == be.extIface.ExtAddr.String() {
+			log.Infof("Found network")
+			hcnnetwork, err := hcn.GetNetworkByID(hnsnetwork.Id)
+			policies := hcnnetwork.Policies
+			for _, policy := range policies {
+				log.Infof("Found policy: %v", policy)
+				if policy.Type == hcn.DrMacAddress {
+
+					policySettings := hcn.DrMacAddressNetworkPolicySetting{}
+					err = json.Unmarshal(policy.Settings, &policySettings)
+					if err != nil {
+						log. Infof("Failed to unmarshal settings")
+					}
+					log.Infof("Found policy settings %v", policySettings)
+					remoteDrMac = policySettings.Address
+				}
+			}
+
+		}
+	}
+	mac, err := net.ParseMAC(string(remoteDrMac))
 	if err != nil {
 		return nil, err
 	}
-	dev.directRouting = cfg.DirectRouting
-	dev.macPrefix = cfg.MacPrefix
 
-	subnetAttrs, err := newSubnetAttrs(be.extIface.ExtAddr)
+	subnetAttrs, err := newSubnetAttrs(be.extIface.ExtAddr, uint16(cfg.VNI), mac)
 	if err != nil {
 		return nil, err
 	}
@@ -137,6 +175,42 @@ func (be *VXLANBackend) RegisterNetwork(ctx context.Context, wg sync.WaitGroup, 
 	default:
 		return nil, fmt.Errorf("failed to acquire lease: %v", err)
 	}
+	devAttrs := vxlanDeviceAttrs{
+		vni:           uint32(cfg.VNI),
+		name:          cfg.Name,
+		addressPrefix: lease.Subnet,
+	}
+
+	dev, err := newVXLANDevice(&devAttrs)
+	if err != nil {
+		return nil, err
+	}
+	log.Infof("Device: %s", dev)
+	dev.directRouting = cfg.DirectRouting
+	dev.macPrefix = cfg.MacPrefix
 
 	return newNetwork(be.subnetMgr, be.extIface, dev, ip.IP4Net{}, lease)
+}
+
+// So we can make it JSON (un)marshalable
+type hardwareAddr net.HardwareAddr
+
+func (hw hardwareAddr) MarshalJSON() ([]byte, error) {
+	return []byte(fmt.Sprintf("%q", net.HardwareAddr(hw))), nil
+}
+
+func (hw *hardwareAddr) UnmarshalJSON(bytes []byte) error {
+	if len(bytes) < 2 || bytes[0] != '"' || bytes[len(bytes)-1] != '"' {
+		return fmt.Errorf("error parsing hardware addr")
+	}
+
+	bytes = bytes[1 : len(bytes)-1]
+
+	mac, err := net.ParseMAC(string(bytes))
+	if err != nil {
+		return err
+	}
+
+	*hw = hardwareAddr(mac)
+	return nil
 }

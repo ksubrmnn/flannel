@@ -105,13 +105,18 @@ func ensureNetwork(expectedNetwork *hcsshim.HNSNetwork, expectedVSID int64, expe
 		if err != nil {
 			return nil, errors.Annotatef(err, "failed to create HNSNetwork %s", networkName)
 		}
+		log.Infof("newNetwork(%s)", newNetwork)
+
 
 		var waitErr, lastErr error
 		// Wait for the network to populate Management IP
 		log.Infof("Waiting to get ManagementIP from HNSNetwork %s", networkName)
 		waitErr = wait.Poll(500*time.Millisecond, 5*time.Second, func() (done bool, err error) {
 			newNetwork, lastErr = hcsshim.HNSNetworkRequest("GET", newNetwork.Id, "")
-			return newNetwork != nil && len(newNetwork.ManagementIP) == 0, nil
+			log.Infof("newNetwork(%s)", newNetwork)
+			log.Infof("ManagementIP(%s)", newNetwork.ManagementIP)
+			log.Infof("Condition %t, %t, %t",newNetwork != nil, len(newNetwork.ManagementIP) == 0, newNetwork != nil && len(newNetwork.ManagementIP) == 0)
+			return newNetwork != nil && len(newNetwork.ManagementIP) != 0, nil
 		})
 		if waitErr == wait.ErrWaitTimeout {
 			return nil, errors.Annotatef(lastErr, "timeout, failed to get management IP from HNSNetwork %s", networkName)
