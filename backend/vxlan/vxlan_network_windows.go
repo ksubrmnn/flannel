@@ -142,6 +142,29 @@ func (nw *network) handleSubnetEvents(batch []subnet.Event) {
 					log.Error(err)
 				}
 			}*/
+			for _, policy := range hnsnetwork.Policies {
+				if policy.Type == hcn.RemoteSubnetRoute {
+					policySettings := hcn.RemoteSubnetRoutePolicySetting{}
+					err = json.Unmarshal(policy.Settings, &policySettings)
+					if err != nil {
+						log.Error("Failed to unmarshal settings")
+					}
+					if policySettings.DestinationPrefix == networkPolicySettings.DestinationPrefix {
+						existingJson, err := json.Marshal(policySettings)
+						if err != nil {
+							log.Error("Failed to marshal settings")
+						}
+						existingPolicy := hcn.NetworkPolicy{
+							Type: hcn.RemoteSubnetRoute,
+							Settings: existingJson,
+						}
+						existinPolicyNetworkRequest := hcn.PolicyNetworkRequest{ 
+							Policies: []hcn.NetworkPolicy{existingPolicy},
+						}
+						hnsnetwork.RemovePolicy(existinPolicyNetworkRequest)
+					}
+				}
+			}
 			if networkPolicySettings.DistributedRouterMacAddress != "" {
 				hnsnetwork.AddPolicy(policyNetworkRequest)
 			}
